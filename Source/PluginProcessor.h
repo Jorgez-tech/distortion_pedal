@@ -40,7 +40,49 @@ public:
     juce::AudioProcessorValueTreeState apvts;
 
 private:
+    using Filter = juce::dsp::IIR::Filter<float>;
+    using Gain = juce::dsp::Gain<float>;
+
+    struct OversampledClipper
+    {
+        void prepare (const juce::dsp::ProcessSpec& spec);
+        void reset();
+        void process (const juce::dsp::ProcessContextReplacing<float>& context) noexcept;
+        void setClipMode (int newMode) noexcept;
+
+    private:
+        std::atomic<int> clipMode { 0 };
+        juce::dsp::Oversampling<float> oversampling { 2, 2, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, false };
+        juce::dsp::WaveShaper<float> waveshaper;
+    };
+
+    using DistortionChain = juce::dsp::ProcessorChain<Filter, Gain, OversampledClipper, Filter, Gain>;
+
+    enum ChainIndex
+    {
+        preEQIndex = 0,
+        preGainIndex,
+        clipperIndex,
+        postEQIndex,
+        outputGainIndex
+    };
+
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+    void updateHighPassCoefficients() noexcept;
+    void updateLowPassCoefficients (float cutoffHz) noexcept;
+    static void setBiquadCoefficients (Filter& filter, double sampleRate, float cutoffHz, float q, bool highPass) noexcept;
+
+    DistortionChain dspChain;
+    juce::AudioBuffer<float> dryBuffer;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> mixSmoothed;
+    double currentSampleRate = 44100.0;
+
+    std::atomic<float>* driveParam = nullptr;
+    std::atomic<float>* toneParam = nullptr;
+    std::atomic<float>* levelParam = nullptr;
+    std::atomic<float>* mixParam = nullptr;
+    std::atomic<float>* bypassParam = nullptr;
+    std::atomic<float>* clipTypeParam = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DistortXAudioProcessor)
 };
