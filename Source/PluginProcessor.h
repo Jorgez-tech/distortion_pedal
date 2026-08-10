@@ -40,6 +40,7 @@ public:
     juce::AudioProcessorValueTreeState apvts;
 
 private:
+    using NoiseGate = juce::dsp::NoiseGate<float>;
     using Filter = juce::dsp::IIR::Filter<float>;
     using Gain = juce::dsp::Gain<float>;
 
@@ -56,11 +57,12 @@ private:
         juce::dsp::WaveShaper<float> waveshaper;
     };
 
-    using DistortionChain = juce::dsp::ProcessorChain<Filter, Gain, OversampledClipper, Filter, Gain>;
+    using DistortionChain = juce::dsp::ProcessorChain<NoiseGate, Filter, Gain, OversampledClipper, Filter, Gain>;
 
     enum ChainIndex
     {
-        preEQIndex = 0,
+        gateIndex = 0,
+        preEQIndex,
         preGainIndex,
         clipperIndex,
         postEQIndex,
@@ -79,9 +81,13 @@ private:
     float lastToneCutoffHz = -1.0f;
     float lastDriveDb = -1000.0f;
     float lastLevelDb = -1000.0f;
+    float lastGateThresholdDb = 1.0f;
+    float lastGateDecayMs = -1.0f;
     int lastClipMode = -1;
     std::atomic<bool> filtersNeedRefresh { true };
 
+    std::atomic<float>* gateThresholdParam = nullptr;
+    std::atomic<float>* gateDecayParam = nullptr;
     std::atomic<float>* driveParam = nullptr;
     std::atomic<float>* toneParam = nullptr;
     std::atomic<float>* levelParam = nullptr;

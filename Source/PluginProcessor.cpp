@@ -57,6 +57,8 @@ DistortXAudioProcessor::DistortXAudioProcessor()
        apvts(*this, nullptr, "Parameters", createParameterLayout())
 #endif
 {
+    gateThresholdParam = apvts.getRawParameterValue ("gateThreshold");
+    gateDecayParam = apvts.getRawParameterValue ("gateDecay");
     driveParam = apvts.getRawParameterValue ("drive");
     toneParam = apvts.getRawParameterValue ("tone");
     levelParam = apvts.getRawParameterValue ("level");
@@ -78,6 +80,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout DistortXAudioProcessor::crea
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
 
+    params.push_back (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "gateThreshold", 1 }, "Gate Threshold",
+                                                                    juce::NormalisableRange<float> (-100.0f, 0.0f, 0.1f), -60.0f));
+    params.push_back (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "gateDecay", 1 }, "Gate Decay",
+                                                                    juce::NormalisableRange<float> (5.0f, 500.0f, 1.0f, 0.5f), 120.0f));
     params.push_back (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "drive", 1 }, "Drive",
                                                                     juce::NormalisableRange<float> (0.0f, 36.0f, 0.01f), 12.0f));
     params.push_back (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "tone", 1 }, "Tone",
@@ -104,6 +110,10 @@ void DistortXAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
 
     dspChain.prepare (spec);
     dspChain.reset();
+    dspChain.get<gateIndex>().setRatio (100.0f);
+    dspChain.get<gateIndex>().setAttack (2.0f);
+    dspChain.get<gateIndex>().setThreshold (juce::jlimit (-100.0f, 0.0f, gateThresholdParam->load (std::memory_order_relaxed)));
+    dspChain.get<gateIndex>().setRelease (juce::jlimit (5.0f, 500.0f, gateDecayParam->load (std::memory_order_relaxed)));
     dspChain.get<preGainIndex>().setRampDurationSeconds (0.02);
     dspChain.get<outputGainIndex>().setRampDurationSeconds (0.02);
 
@@ -115,6 +125,8 @@ void DistortXAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     lastToneCutoffHz = -1.0f;
     lastDriveDb = -1000.0f;
     lastLevelDb = -1000.0f;
+    lastGateThresholdDb = 1.0f;
+    lastGateDecayMs = -1.0f;
     lastClipMode = -1;
     filtersNeedRefresh.store (true, std::memory_order_release);
 }
@@ -157,13 +169,24 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         return;
     }
 
-    for (int channel = 0; channel < totalNumInputChannels; ++channel)
-        juce::FloatVectorOperations::copy (dryBuffer.getWritePointer (channel), buffer.getReadPointer (channel), numSamples);
-
     const auto driveDb = driveParam->load (std::memory_order_relaxed);
     const auto levelDb = levelParam->load (std::memory_order_relaxed);
     const auto mixValue = juce::jlimit (0.0f, 1.0f, mixParam->load (std::memory_order_relaxed));
     const auto toneCutoff = juce::jlimit (800.0f, 18000.0f, toneParam->load (std::memory_order_relaxed));
+    const auto gateThresholdDb = juce::jlimit (-100.0f, 0.0f, gateThresholdParam->load (std::memory_order_relaxed));
+    const auto gateDecayMs = juce::jlimit (5.0f, 500.0f, gateDecayParam->load (std::memory_order_relaxed));
+
+    if (std::abs (gateThresholdDb - lastGateThresholdDb) > 0.05f)
+    {
+        dspChain.get<gateIndex>().setThreshold (gateThresholdDb);
+        lastGateThresholdDb = gateThresholdDb;
+    }
+
+    if (std::abs (gateDecayMs - lastGateDecayMs) > 0.5f)
+    {
+        dspChain.get<gateIndex>().setRelease (gateDecayMs);
+        lastGateDecayMs = gateDecayMs;
+    }
 
     if (std::abs (driveDb - lastDriveDb) > 0.001f)
     {
@@ -198,7 +221,16 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 
     juce::dsp::AudioBlock<float> block (buffer);
     juce::dsp::ProcessContextReplacing<float> context (block);
-    dspChain.process (context);
+    dspChain.get<gateIndex>().process (context);
+
+    for (int channel = 0; channel < totalNumInputChannels; ++channel)
+        juce::FloatVectorOperations::copy (dryBuffer.getWritePointer (channel), buffer.getReadPointer (channel), numSamples);
+
+    dspChain.get<preEQIndex>().process (context);
+    dspChain.get<preGainIndex>().process (context);
+    dspChain.get<clipperIndex>().process (context);
+    dspChain.get<postEQIndex>().process (context);
+    dspChain.get<outputGainIndex>().process (context);
 
     float* wetPointers[2] {};
     const float* dryPointers[2] {};

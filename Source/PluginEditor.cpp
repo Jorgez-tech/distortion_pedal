@@ -4,7 +4,7 @@
 DistortXAudioProcessorEditor::DistortXAudioProcessorEditor (DistortXAudioProcessor& p)
     : AudioProcessorEditor (&p), audioProcessor (p)
 {
-    setSize (520, 300);
+    setSize (740, 300);
 
     auto configureRotary = [] (juce::Slider& slider)
     {
@@ -12,6 +12,8 @@ DistortXAudioProcessorEditor::DistortXAudioProcessorEditor (DistortXAudioProcess
         slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 60, 20);
     };
 
+    configureRotary (gateThresholdSlider);
+    configureRotary (gateDecaySlider);
     configureRotary (driveSlider);
     configureRotary (toneSlider);
     configureRotary (levelSlider);
@@ -21,6 +23,8 @@ DistortXAudioProcessorEditor::DistortXAudioProcessorEditor (DistortXAudioProcess
     clipTypeComboBox.addItem ("Hard", 2);
     bypassButton.setButtonText ("Bypass");
 
+    addAndMakeVisible (gateThresholdSlider);
+    addAndMakeVisible (gateDecaySlider);
     addAndMakeVisible (driveSlider);
     addAndMakeVisible (toneSlider);
     addAndMakeVisible (levelSlider);
@@ -28,6 +32,8 @@ DistortXAudioProcessorEditor::DistortXAudioProcessorEditor (DistortXAudioProcess
     addAndMakeVisible (clipTypeComboBox);
     addAndMakeVisible (bypassButton);
 
+    gateThresholdAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (audioProcessor.apvts, "gateThreshold", gateThresholdSlider);
+    gateDecayAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (audioProcessor.apvts, "gateDecay", gateDecaySlider);
     driveAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (audioProcessor.apvts, "drive", driveSlider);
     toneAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (audioProcessor.apvts, "tone", toneSlider);
     levelAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (audioProcessor.apvts, "level", levelSlider);
@@ -56,6 +62,10 @@ void DistortXAudioProcessorEditor::resized()
     auto topRow = area.removeFromTop (190);
     const int knobSize = 110;
     const int gap = 8;
+    gateThresholdSlider.setBounds (topRow.removeFromLeft (knobSize));
+    topRow.removeFromLeft (gap);
+    gateDecaySlider.setBounds (topRow.removeFromLeft (knobSize));
+    topRow.removeFromLeft (gap);
     driveSlider.setBounds (topRow.removeFromLeft (knobSize));
     topRow.removeFromLeft (gap);
     toneSlider.setBounds (topRow.removeFromLeft (knobSize));
