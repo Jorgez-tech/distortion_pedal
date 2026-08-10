@@ -113,8 +113,9 @@ void DistortXAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     dryBuffer.setSize (getTotalNumInputChannels(), samplesPerBlock, false, false, true);
 
     lastToneCutoffHz = -1.0f;
-    lastDriveDb = std::numeric_limits<float>::quiet_NaN();
-    lastLevelDb = std::numeric_limits<float>::quiet_NaN();
+    lastDriveDb = -1000.0f;
+    lastLevelDb = -1000.0f;
+    lastClipMode = -1;
     filtersNeedRefresh.store (true, std::memory_order_release);
 }
 
@@ -169,7 +170,12 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         dspChain.get<outputGainIndex>().setGainDecibels (levelDb);
         lastLevelDb = levelDb;
     }
-    dspChain.get<clipperIndex>().setClipMode (static_cast<int> (clipTypeParam->load (std::memory_order_relaxed)));
+    const auto clipMode = static_cast<int> (clipTypeParam->load (std::memory_order_relaxed));
+    if (clipMode != lastClipMode)
+    {
+        dspChain.get<clipperIndex>().setClipMode (clipMode);
+        lastClipMode = clipMode;
+    }
     mixSmoothed.setTargetValue (mixValue);
 
     if (filtersNeedRefresh.exchange (false, std::memory_order_acq_rel))
@@ -215,10 +221,39 @@ void DistortXAudioProcessor::setBiquadCoefficients (Filter& filter, double sampl
 {
     const auto nyquist = static_cast<float> (sampleRate * 0.5);
     const auto clampedCutoff = juce::jlimit (20.0f, nyquist - 1.0f, cutoffHz);
+    const auto omega = juce::MathConstants<float>::twoPi * clampedCutoff / static_cast<float> (sampleRate);
+    const auto sinOmega = std::sin (omega);
+    const auto cosOmega = std::cos (omega);
+    const auto alpha = sinOmega / (2.0f * q);
+
+    float b0 = 0.0f;
+    float b1 = 0.0f;
+    float b2 = 0.0f;
+
     if (highPass)
-        filter.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (sampleRate, clampedCutoff, q);
+    {
+        b0 = (1.0f + cosOmega) * 0.5f;
+        b1 = -(1.0f + cosOmega);
+        b2 = b0;
+    }
     else
-        filter.coefficients = juce::dsp::IIR::Coefficients<float>::makeLowPass (sampleRate, clampedCutoff, q);
+    {
+        b0 = (1.0f - cosOmega) * 0.5f;
+        b1 = 1.0f - cosOmega;
+        b2 = b0;
+    }
+
+    const auto a0 = 1.0f + alpha;
+    const auto a1 = -2.0f * cosOmega;
+    const auto a2 = 1.0f - alpha;
+    const auto invA0 = 1.0f / a0;
+
+    auto& c = filter.coefficients->coefficients;
+    c[0] = b0 * invA0;
+    c[1] = b1 * invA0;
+    c[2] = b2 * invA0;
+    c[3] = a1 * invA0;
+    c[4] = a2 * invA0;
 }
 
 bool DistortXAudioProcessor::hasEditor() const
