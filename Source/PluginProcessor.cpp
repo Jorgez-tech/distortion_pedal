@@ -3,6 +3,14 @@
 
 void DistortXAudioProcessor::OversampledClipper::prepare (const juce::dsp::ProcessSpec& spec)
 {
+    waveshaper.functionToUse = [this] (float x) noexcept
+    {
+        if (clipMode.load (std::memory_order_relaxed) == 0)
+            return std::tanh (x);
+
+        return juce::jlimit (-1.0f, 1.0f, x);
+    };
+
     oversampling = std::make_unique<juce::dsp::Oversampling<float>> (spec.numChannels, 2, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, false);
     oversampling->reset();
     oversampling->initProcessing (spec.maximumBlockSize);
@@ -11,13 +19,6 @@ void DistortXAudioProcessor::OversampledClipper::prepare (const juce::dsp::Proce
                                            spec.maximumBlockSize * oversampling->getOversamplingFactor(),
                                            spec.numChannels };
     waveshaper.prepare (upsampledSpec);
-    waveshaper.functionToUse = [this] (float x) noexcept
-    {
-        if (clipMode.load (std::memory_order_relaxed) == 0)
-            return std::tanh (x);
-
-        return juce::jlimit (-1.0f, 1.0f, x);
-    };
 }
 
 void DistortXAudioProcessor::OversampledClipper::reset()
@@ -94,7 +95,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout DistortXAudioProcessor::crea
 
 void DistortXAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    currentSampleRate = sampleRate;
+    currentSampleRate.store (sampleRate, std::memory_order_release);
 
     juce::dsp::ProcessSpec spec;
     spec.sampleRate = sampleRate;
@@ -112,6 +113,8 @@ void DistortXAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     dryBuffer.setSize (getTotalNumInputChannels(), samplesPerBlock, false, false, true);
 
     lastToneCutoffHz = -1.0f;
+    lastDriveDb = std::numeric_limits<float>::quiet_NaN();
+    lastLevelDb = std::numeric_limits<float>::quiet_NaN();
     filtersNeedRefresh.store (true, std::memory_order_release);
 }
 
@@ -155,8 +158,17 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     const auto mixValue = juce::jlimit (0.0f, 1.0f, mixParam->load (std::memory_order_relaxed));
     const auto toneCutoff = juce::jlimit (800.0f, 18000.0f, toneParam->load (std::memory_order_relaxed));
 
-    dspChain.get<preGainIndex>().setGainDecibels (driveDb);
-    dspChain.get<outputGainIndex>().setGainDecibels (levelDb);
+    if (std::abs (driveDb - lastDriveDb) > 0.001f)
+    {
+        dspChain.get<preGainIndex>().setGainDecibels (driveDb);
+        lastDriveDb = driveDb;
+    }
+
+    if (std::abs (levelDb - lastLevelDb) > 0.001f)
+    {
+        dspChain.get<outputGainIndex>().setGainDecibels (levelDb);
+        lastLevelDb = levelDb;
+    }
     dspChain.get<clipperIndex>().setClipMode (static_cast<int> (clipTypeParam->load (std::memory_order_relaxed)));
     mixSmoothed.setTargetValue (mixValue);
 
@@ -191,12 +203,12 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 
 void DistortXAudioProcessor::updateHighPassCoefficients() noexcept
 {
-    setBiquadCoefficients (dspChain.get<preEQIndex>(), currentSampleRate, 120.0f, 0.70710678f, true);
+    setBiquadCoefficients (dspChain.get<preEQIndex>(), currentSampleRate.load (std::memory_order_acquire), 120.0f, 0.70710678f, true);
 }
 
 void DistortXAudioProcessor::updateLowPassCoefficients (float cutoffHz) noexcept
 {
-    setBiquadCoefficients (dspChain.get<postEQIndex>(), currentSampleRate, cutoffHz, 0.70710678f, false);
+    setBiquadCoefficients (dspChain.get<postEQIndex>(), currentSampleRate.load (std::memory_order_acquire), cutoffHz, 0.70710678f, false);
 }
 
 void DistortXAudioProcessor::setBiquadCoefficients (Filter& filter, double sampleRate, float cutoffHz, float q, bool highPass) noexcept
@@ -204,9 +216,9 @@ void DistortXAudioProcessor::setBiquadCoefficients (Filter& filter, double sampl
     const auto nyquist = static_cast<float> (sampleRate * 0.5);
     const auto clampedCutoff = juce::jlimit (20.0f, nyquist - 1.0f, cutoffHz);
     if (highPass)
-        *filter.coefficients = *juce::dsp::IIR::Coefficients<float>::makeHighPass (sampleRate, clampedCutoff, q);
+        filter.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (sampleRate, clampedCutoff, q);
     else
-        *filter.coefficients = *juce::dsp::IIR::Coefficients<float>::makeLowPass (sampleRate, clampedCutoff, q);
+        filter.coefficients = juce::dsp::IIR::Coefficients<float>::makeLowPass (sampleRate, clampedCutoff, q);
 }
 
 bool DistortXAudioProcessor::hasEditor() const

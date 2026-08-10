@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <limits>
 
 class DistortXAudioProcessor : public juce::AudioProcessor
 {
@@ -75,8 +76,10 @@ private:
     DistortionChain dspChain;
     juce::AudioBuffer<float> dryBuffer;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> mixSmoothed;
-    double currentSampleRate = 44100.0;
+    std::atomic<double> currentSampleRate { 44100.0 };
     float lastToneCutoffHz = -1.0f;
+    float lastDriveDb = std::numeric_limits<float>::quiet_NaN();
+    float lastLevelDb = std::numeric_limits<float>::quiet_NaN();
     std::atomic<bool> filtersNeedRefresh { true };
 
     std::atomic<float>* driveParam = nullptr;
