@@ -77,6 +77,7 @@ private:
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> mixSmoothed;
     double currentSampleRate = 44100.0;
     float lastToneCutoffHz = -1.0f;
+    std::atomic<bool> filtersNeedRefresh { true };
 
     std::atomic<float>* driveParam = nullptr;
     std::atomic<float>* toneParam = nullptr;

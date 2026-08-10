@@ -112,8 +112,7 @@ void DistortXAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     dryBuffer.setSize (getTotalNumInputChannels(), samplesPerBlock, false, false, true);
 
     lastToneCutoffHz = -1.0f;
-    updateHighPassCoefficients();
-    updateLowPassCoefficients (toneParam->load (std::memory_order_relaxed));
+    filtersNeedRefresh.store (true, std::memory_order_release);
 }
 
 void DistortXAudioProcessor::releaseResources()
@@ -160,6 +159,12 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     dspChain.get<outputGainIndex>().setGainDecibels (levelDb);
     dspChain.get<clipperIndex>().setClipMode (static_cast<int> (clipTypeParam->load (std::memory_order_relaxed)));
     mixSmoothed.setTargetValue (mixValue);
+
+    if (filtersNeedRefresh.exchange (false, std::memory_order_acq_rel))
+    {
+        updateHighPassCoefficients();
+        lastToneCutoffHz = -1.0f;
+    }
 
     if (std::abs (toneCutoff - lastToneCutoffHz) > 0.5f)
     {
