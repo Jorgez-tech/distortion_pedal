@@ -8,7 +8,7 @@ DistortX es un plugin de audio digital (VST3, AU, Standalone) desarrollado en C+
 *   **Controles Intuitivos:**
     *   **Gate Threshold / Gate Decay:** Compuerta de ruido al inicio de la cadena DSP para recortar hum y ruido de piso antes de la etapa de ganancia.
     *   **Drive:** Ganancia de entrada hacia la saturación.
-    *   **Tone:** Filtro paso-bajo (Low-Pass Filter) para controlar la estridencia y suavizar las agudos.
+    *   **Tone:** Filtro paso-bajo (Low-Pass Filter) para controlar la estridencia y suavizar los agudos.
     *   **Level:** Ajuste de volumen compensatorio en la salida.
     *   **Mix:** Control de mezcla Dry/Wet para el procesamiento paralelo.
 *   **Oversampling:** Soporte de anti-aliasing empleando sobremuestreo interno para eliminar los ecos inarmónicos generados por la distorsión no lineal.

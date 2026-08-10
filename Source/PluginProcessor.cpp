@@ -133,7 +133,7 @@ void DistortXAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     lastToneCutoffHz = -1.0f;
     lastDriveDb = -1000.0f;
     lastLevelDb = -1000.0f;
-    lastGateThresholdDb = 1.0f;
+    lastGateThresholdDb = -1000.0f;
     lastGateDecayMs = -1.0f;
     lastClipMode = -1;
     filtersNeedRefresh.store (true, std::memory_order_release);
@@ -176,6 +176,8 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         jassertfalse;
         return;
     }
+
+    jassert (totalNumInputChannels <= 2);
 
     const auto driveDb = driveParam->load (std::memory_order_relaxed);
     const auto levelDb = levelParam->load (std::memory_order_relaxed);

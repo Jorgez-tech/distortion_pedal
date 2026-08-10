@@ -81,7 +81,7 @@ private:
     float lastToneCutoffHz = -1.0f;
     float lastDriveDb = -1000.0f;
     float lastLevelDb = -1000.0f;
-    float lastGateThresholdDb = 1.0f;
+    float lastGateThresholdDb = -1000.0f;
     float lastGateDecayMs = -1.0f;
     int lastClipMode = -1;
     std::atomic<bool> filtersNeedRefresh { true };
