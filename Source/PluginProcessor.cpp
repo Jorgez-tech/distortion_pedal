@@ -107,6 +107,7 @@ void DistortXAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
 
     dryBuffer.setSize (getTotalNumInputChannels(), samplesPerBlock, false, false, true);
 
+    lastToneCutoffHz = -1.0f;
     updateHighPassCoefficients();
     updateLowPassCoefficients (toneParam->load (std::memory_order_relaxed));
 }
@@ -156,20 +157,24 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     dspChain.get<clipperIndex>().setClipMode (static_cast<int> (clipTypeParam->load (std::memory_order_relaxed)));
     mixSmoothed.setTargetValue (mixValue);
 
-    updateLowPassCoefficients (toneCutoff);
+    if (std::abs (toneCutoff - lastToneCutoffHz) > 0.5f)
+    {
+        updateLowPassCoefficients (toneCutoff);
+        lastToneCutoffHz = toneCutoff;
+    }
 
     juce::dsp::AudioBlock<float> block (buffer);
     juce::dsp::ProcessContextReplacing<float> context (block);
     dspChain.process (context);
 
-    for (int channel = 0; channel < totalNumInputChannels; ++channel)
+    for (int sample = 0; sample < numSamples; ++sample)
     {
-        auto* wet = buffer.getWritePointer (channel);
-        const auto* dry = dryBuffer.getReadPointer (channel);
+        const auto mix = mixSmoothed.getNextValue();
 
-        for (int sample = 0; sample < numSamples; ++sample)
+        for (int channel = 0; channel < totalNumInputChannels; ++channel)
         {
-            const auto mix = mixSmoothed.getNextValue();
+            auto* wet = buffer.getWritePointer (channel);
+            const auto* dry = dryBuffer.getReadPointer (channel);
             wet[sample] = juce::jmap (mix, dry[sample], wet[sample]);
         }
     }
@@ -220,9 +225,8 @@ void DistortXAudioProcessor::setBiquadCoefficients (Filter& filter, double sampl
     c[0] = b0 * invA0;
     c[1] = b1 * invA0;
     c[2] = b2 * invA0;
-    c[3] = 1.0f;
-    c[4] = a1 * invA0;
-    c[5] = a2 * invA0;
+    c[3] = a1 * invA0;
+    c[4] = a2 * invA0;
 }
 
 bool DistortXAudioProcessor::hasEditor() const

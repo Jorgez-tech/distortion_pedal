@@ -52,7 +52,7 @@ private:
 
     private:
         std::atomic<int> clipMode { 0 };
-        juce::dsp::Oversampling<float> oversampling { 2, 2, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, false };
+        juce::dsp::Oversampling<float> oversampling { 1, 2, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, false };
         juce::dsp::WaveShaper<float> waveshaper;
     };
 
@@ -76,6 +76,7 @@ private:
     juce::AudioBuffer<float> dryBuffer;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> mixSmoothed;
     double currentSampleRate = 44100.0;
+    float lastToneCutoffHz = -1.0f;
 
     std::atomic<float>* driveParam = nullptr;
     std::atomic<float>* toneParam = nullptr;
