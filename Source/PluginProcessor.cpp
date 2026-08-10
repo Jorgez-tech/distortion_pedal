@@ -151,6 +151,12 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         return;
 
     const int numSamples = buffer.getNumSamples();
+    if (totalNumInputChannels > dryBuffer.getNumChannels() || numSamples > dryBuffer.getNumSamples())
+    {
+        jassertfalse;
+        return;
+    }
+
     for (int channel = 0; channel < totalNumInputChannels; ++channel)
         juce::FloatVectorOperations::copy (dryBuffer.getWritePointer (channel), buffer.getReadPointer (channel), numSamples);
 
@@ -194,16 +200,20 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     juce::dsp::ProcessContextReplacing<float> context (block);
     dspChain.process (context);
 
+    float* wetPointers[2] {};
+    const float* dryPointers[2] {};
+    for (int channel = 0; channel < totalNumInputChannels; ++channel)
+    {
+        wetPointers[channel] = buffer.getWritePointer (channel);
+        dryPointers[channel] = dryBuffer.getReadPointer (channel);
+    }
+
     for (int sample = 0; sample < numSamples; ++sample)
     {
         const auto mix = mixSmoothed.getNextValue();
 
         for (int channel = 0; channel < totalNumInputChannels; ++channel)
-        {
-            auto* wet = buffer.getWritePointer (channel);
-            const auto* dry = dryBuffer.getReadPointer (channel);
-            wet[sample] = juce::jmap (mix, dry[sample], wet[sample]);
-        }
+            wetPointers[channel][sample] = juce::jmap (mix, dryPointers[channel][sample], wetPointers[channel][sample]);
     }
 }
 
