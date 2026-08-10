@@ -3,12 +3,12 @@
 
 void DistortXAudioProcessor::OversampledClipper::prepare (const juce::dsp::ProcessSpec& spec)
 {
-    oversampling = juce::dsp::Oversampling<float> (spec.numChannels, 2, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, false);
-    oversampling.reset();
-    oversampling.initProcessing (spec.maximumBlockSize);
+    oversampling = std::make_unique<juce::dsp::Oversampling<float>> (spec.numChannels, 2, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, false);
+    oversampling->reset();
+    oversampling->initProcessing (spec.maximumBlockSize);
 
-    juce::dsp::ProcessSpec upsampledSpec { spec.sampleRate * oversampling.getOversamplingFactor(),
-                                           spec.maximumBlockSize * oversampling.getOversamplingFactor(),
+    juce::dsp::ProcessSpec upsampledSpec { spec.sampleRate * oversampling->getOversamplingFactor(),
+                                           spec.maximumBlockSize * oversampling->getOversamplingFactor(),
                                            spec.numChannels };
     waveshaper.prepare (upsampledSpec);
     waveshaper.functionToUse = [this] (float x) noexcept
@@ -22,16 +22,20 @@ void DistortXAudioProcessor::OversampledClipper::prepare (const juce::dsp::Proce
 
 void DistortXAudioProcessor::OversampledClipper::reset()
 {
-    oversampling.reset();
+    if (oversampling != nullptr)
+        oversampling->reset();
     waveshaper.reset();
 }
 
 void DistortXAudioProcessor::OversampledClipper::process (const juce::dsp::ProcessContextReplacing<float>& context) noexcept
 {
-    auto oversampledBlock = oversampling.processSamplesUp (context.getOutputBlock());
+    if (oversampling == nullptr)
+        return;
+
+    auto oversampledBlock = oversampling->processSamplesUp (context.getOutputBlock());
     juce::dsp::ProcessContextReplacing<float> oversampledContext (oversampledBlock);
     waveshaper.process (oversampledContext);
-    oversampling.processSamplesDown (context.getOutputBlock());
+    oversampling->processSamplesDown (context.getOutputBlock());
 }
 
 void DistortXAudioProcessor::OversampledClipper::setClipMode (int newMode) noexcept
@@ -147,13 +151,13 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     for (int channel = 0; channel < totalNumInputChannels; ++channel)
         juce::FloatVectorOperations::copy (dryBuffer.getWritePointer (channel), buffer.getReadPointer (channel), numSamples);
 
-    const auto driveGain = juce::Decibels::decibelsToGain (driveParam->load (std::memory_order_relaxed));
-    const auto outputGain = juce::Decibels::decibelsToGain (levelParam->load (std::memory_order_relaxed));
+    const auto driveDb = driveParam->load (std::memory_order_relaxed);
+    const auto levelDb = levelParam->load (std::memory_order_relaxed);
     const auto mixValue = juce::jlimit (0.0f, 1.0f, mixParam->load (std::memory_order_relaxed));
     const auto toneCutoff = juce::jlimit (800.0f, 18000.0f, toneParam->load (std::memory_order_relaxed));
 
-    dspChain.get<preGainIndex>().setGainLinear (driveGain);
-    dspChain.get<outputGainIndex>().setGainLinear (outputGain);
+    dspChain.get<preGainIndex>().setGainDecibels (driveDb);
+    dspChain.get<outputGainIndex>().setGainDecibels (levelDb);
     dspChain.get<clipperIndex>().setClipMode (static_cast<int> (clipTypeParam->load (std::memory_order_relaxed)));
     mixSmoothed.setTargetValue (mixValue);
 
@@ -194,39 +198,10 @@ void DistortXAudioProcessor::setBiquadCoefficients (Filter& filter, double sampl
 {
     const auto nyquist = static_cast<float> (sampleRate * 0.5);
     const auto clampedCutoff = juce::jlimit (20.0f, nyquist - 1.0f, cutoffHz);
-    const auto omega = juce::MathConstants<float>::twoPi * clampedCutoff / static_cast<float> (sampleRate);
-    const auto sinOmega = std::sin (omega);
-    const auto cosOmega = std::cos (omega);
-    const auto alpha = sinOmega / (2.0f * q);
-
-    float b0 = 0.0f;
-    float b1 = 0.0f;
-    float b2 = 0.0f;
-
     if (highPass)
-    {
-        b0 = (1.0f + cosOmega) * 0.5f;
-        b1 = -(1.0f + cosOmega);
-        b2 = b0;
-    }
+        *filter.coefficients = *juce::dsp::IIR::Coefficients<float>::makeHighPass (sampleRate, clampedCutoff, q);
     else
-    {
-        b0 = (1.0f - cosOmega) * 0.5f;
-        b1 = 1.0f - cosOmega;
-        b2 = b0;
-    }
-
-    const auto a0 = 1.0f + alpha;
-    const auto a1 = -2.0f * cosOmega;
-    const auto a2 = 1.0f - alpha;
-    const auto invA0 = 1.0f / a0;
-
-    auto& c = filter.coefficients->coefficients;
-    c[0] = b0 * invA0;
-    c[1] = b1 * invA0;
-    c[2] = b2 * invA0;
-    c[3] = a1 * invA0;
-    c[4] = a2 * invA0;
+        *filter.coefficients = *juce::dsp::IIR::Coefficients<float>::makeLowPass (sampleRate, clampedCutoff, q);
 }
 
 bool DistortXAudioProcessor::hasEditor() const

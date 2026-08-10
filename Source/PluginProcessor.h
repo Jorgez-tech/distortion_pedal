@@ -52,7 +52,7 @@ private:
 
     private:
         std::atomic<int> clipMode { 0 };
-        juce::dsp::Oversampling<float> oversampling { 1, 2, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, false };
+        std::unique_ptr<juce::dsp::Oversampling<float>> oversampling;
         juce::dsp::WaveShaper<float> waveshaper;
     };
 
