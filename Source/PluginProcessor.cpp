@@ -10,7 +10,7 @@ void DistortXAudioProcessor::OversampledClipper::prepare (const juce::dsp::Proce
     juce::dsp::ProcessSpec upsampledSpec { spec.sampleRate * oversampling->getOversamplingFactor(),
                                            static_cast<juce::uint32> (spec.maximumBlockSize * oversampling->getOversamplingFactor()),
                                            spec.numChannels };
-    setClipMode (clipMode.load (std::memory_order_relaxed));
+    setClipMode (currentMode >= 0 ? currentMode : 0);
     waveshaper.prepare (upsampledSpec);
 }
 
@@ -34,22 +34,19 @@ void DistortXAudioProcessor::OversampledClipper::process (const juce::dsp::Proce
 
 void DistortXAudioProcessor::OversampledClipper::setClipMode (int newMode) noexcept
 {
-    clipMode.store (newMode, std::memory_order_relaxed);
+    // Llamado exclusivamente desde processBlock() en el audio thread.
+    // No se necesita atomic — currentMode es privado al audio thread.
+    currentMode = newMode;
 
     if (newMode == 0)
     {
-        waveshaper.functionToUse = [] (float x) noexcept
-        {
-            return std::tanh (x);
-        };
-
+        // Soft Clipping: tanh — armónicos impares, calidez analógica
+        waveshaper.functionToUse = [] (float x) noexcept { return std::tanh (x); };
         return;
     }
 
-    waveshaper.functionToUse = [] (float x) noexcept
-    {
-        return juce::jlimit (-1.0f, 1.0f, x);
-    };
+    // Hard Clipping: clamp — agresivo, armónicos pares + impares
+    waveshaper.functionToUse = [] (float x) noexcept { return juce::jlimit (-1.0f, 1.0f, x); };
 }
 
 DistortXAudioProcessor::DistortXAudioProcessor()
@@ -141,6 +138,7 @@ void DistortXAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
 
 void DistortXAudioProcessor::releaseResources()
 {
+    dspChain.reset();
 }
 
 #ifndef JucePlugin_PreferredChannelConfigurations
@@ -250,12 +248,30 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         dryPointers[channel] = dryBuffer.getReadPointer (channel);
     }
 
-    for (int sample = 0; sample < numSamples; ++sample)
+    // Dry/Wet vectorizado por bloques de mix constante para maximizar SIMD throughput.
+    // Si el mix no está en rampa, todo el bloque se puede mezclar de un golpe.
+    // Si está interpolando (automatización), lo hacemos muestra a muestra con SmoothedValue.
+    if (mixSmoothed.isSmoothing())
     {
-        const auto mix = mixSmoothed.getNextValue();
-
-        for (int channel = 0; channel < totalNumInputChannels; ++channel)
-            wetPointers[channel][sample] = juce::jmap (mix, dryPointers[channel][sample], wetPointers[channel][sample]);
+        for (int sample = 0; sample < numSamples; ++sample)
+        {
+            const float mix = mixSmoothed.getNextValue();
+            const float dryGain = 1.0f - mix;
+            for (int ch = 0; ch < totalNumInputChannels; ++ch)
+                wetPointers[ch][sample] = dryGain * dryPointers[ch][sample] + mix * wetPointers[ch][sample];
+        }
+    }
+    else
+    {
+        // Mix estable — usar FloatVectorOperations para SIMD acceleration
+        const float mix    = mixSmoothed.getNextValue();
+        const float dryGain = 1.0f - mix;
+        for (int ch = 0; ch < totalNumInputChannels; ++ch)
+        {
+            // wet = wet * mix + dry * dryGain
+            juce::FloatVectorOperations::multiply (wetPointers[ch], mix, numSamples);
+            juce::FloatVectorOperations::addWithMultiply (wetPointers[ch], dryPointers[ch], dryGain, numSamples);
+        }
     }
 }
 
@@ -290,13 +306,11 @@ bool DistortXAudioProcessor::hasEditor() const
 
 juce::AudioProcessorEditor* DistortXAudioProcessor::createEditor()
 {
-    // Usaremos un Editor genérico temporalmente o directamente el nuestro
     return new DistortXAudioProcessorEditor (*this);
 }
 
 void DistortXAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    // Serializar el estado hacia Reaper
     auto state = apvts.copyState();
     std::unique_ptr<juce::XmlElement> xml (state.createXml());
     copyXmlToBinary (*xml, destData);
@@ -304,11 +318,9 @@ void DistortXAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 
 void DistortXAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    // Cargar el estado desde Reaper
     std::unique_ptr<juce::XmlElement> xmlState (getXmlFromBinary (data, sizeInBytes));
-    if (xmlState.get() != nullptr)
-        if (xmlState->hasTagName (apvts.state.getType()))
-            apvts.replaceState (juce::ValueTree::fromXml (*xmlState));
+    if (xmlState != nullptr && xmlState->hasTagName (apvts.state.getType()))
+        apvts.replaceState (juce::ValueTree::fromXml (*xmlState));
 }
 
 // Envuelve el plugin para ser reconocido por los hosts
