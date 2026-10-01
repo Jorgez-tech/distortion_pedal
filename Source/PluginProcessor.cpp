@@ -32,6 +32,11 @@ void DistortXAudioProcessor::OversampledClipper::process (const juce::dsp::Proce
     oversampling->processSamplesDown (context.getOutputBlock());
 }
 
+// Funciones libres estáticas para el WaveShaper — garantizan zero-allocation
+// en el audio thread sin depender del SBO de std::function (DSP-02).
+static float softClip (float x) noexcept { return std::tanh (x); }
+static float hardClip (float x) noexcept { return juce::jlimit (-1.0f, 1.0f, x); }
+
 void DistortXAudioProcessor::OversampledClipper::setClipMode (int newMode) noexcept
 {
     // Llamado exclusivamente desde processBlock() en el audio thread.
@@ -40,13 +45,14 @@ void DistortXAudioProcessor::OversampledClipper::setClipMode (int newMode) noexc
 
     if (newMode == 0)
     {
-        // Soft Clipping: tanh — armónicos impares, calidez analógica
-        waveshaper.functionToUse = [] (float x) noexcept { return std::tanh (x); };
+        // Soft Clipping: tanh — armónicos impares, calidez analógica.
+        // Puntero a función libre: zero-allocation garantizado.
+        waveshaper.functionToUse = softClip;
         return;
     }
 
-    // Hard Clipping: clamp — agresivo, armónicos pares + impares
-    waveshaper.functionToUse = [] (float x) noexcept { return juce::jlimit (-1.0f, 1.0f, x); };
+    // Hard Clipping: clamp — agresivo, armónicos pares + impares.
+    waveshaper.functionToUse = hardClip;
 }
 
 DistortXAudioProcessor::DistortXAudioProcessor()
@@ -113,6 +119,11 @@ void DistortXAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     spec.maximumBlockSize = static_cast<juce::uint32> (samplesPerBlock);
     spec.numChannels = static_cast<juce::uint32> (juce::jmax (1, getTotalNumInputChannels()));
 
+    // Pre-asignar los objetos Coefficients en el message thread para que el puntero
+    // esté inicializado con orden 2 antes de prepare() y reset().
+    dspChain.get<preEQIndex>().state  = juce::dsp::IIR::Coefficients<float>::makeHighPass (sampleRate, 120.0f, 0.70710678f);
+    dspChain.get<postEQIndex>().state = juce::dsp::IIR::Coefficients<float>::makeLowPass  (sampleRate, 6500.0f, 0.70710678f);
+
     dspChain.prepare (spec);
     dspChain.reset();
     dspChain.get<gateIndex>().setRatio (100.0f);
@@ -122,10 +133,22 @@ void DistortXAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     dspChain.get<preGainIndex>().setRampDurationSeconds (0.02);
     dspChain.get<outputGainIndex>().setRampDurationSeconds (0.02);
 
+    // Configurar reporte de latencia a Reaper (PDC) y compensación de fase en dryBuffer
+    const auto clipperLatency = dspChain.get<clipperIndex>().getLatencyInSamples();
+    setLatencySamples (juce::roundToInt (clipperLatency));
+
+    dryDelayLine.prepare (spec);
+    dryDelayLine.reset();
+    dryDelayLine.setDelay (clipperLatency);
+
     mixSmoothed.reset (sampleRate, 0.02);
     mixSmoothed.setCurrentAndTargetValue (juce::jlimit (0.0f, 1.0f, mixParam->load (std::memory_order_relaxed)));
 
+    bypassSmoothed.reset (sampleRate, 0.01); // 10ms rampa de soft-bypass
+    bypassSmoothed.setCurrentAndTargetValue (bypassParam->load (std::memory_order_relaxed) > 0.5f ? 1.0f : 0.0f);
+
     dryBuffer.setSize (getTotalNumInputChannels(), samplesPerBlock, false, false, true);
+    rawInputBuffer.setSize (getTotalNumInputChannels(), samplesPerBlock, false, false, true);
 
     lastToneCutoffHz = -1.0f;
     lastDriveDb = -1000.0f;
@@ -139,6 +162,7 @@ void DistortXAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
 void DistortXAudioProcessor::releaseResources()
 {
     dspChain.reset();
+    dryDelayLine.reset();
 }
 
 #ifndef JucePlugin_PreferredChannelConfigurations
@@ -159,14 +183,11 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 {
     juce::ignoreUnused (midiMessages);
     juce::ScopedNoDenormals noDenormals;
-    auto totalNumInputChannels  = getTotalNumInputChannels();
-    auto totalNumOutputChannels = getTotalNumOutputChannels();
+    const auto totalNumInputChannels  = getTotalNumInputChannels();
+    const auto totalNumOutputChannels = getTotalNumOutputChannels();
 
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
-
-    if (bypassParam->load (std::memory_order_relaxed) > 0.5f)
-        return;
 
     const int numSamples = buffer.getNumSamples();
     if (totalNumInputChannels > dryBuffer.getNumChannels() || numSamples > dryBuffer.getNumSamples())
@@ -176,6 +197,17 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     }
 
     jassert (totalNumInputChannels <= 2);
+
+    const bool isBypassed = bypassParam->load (std::memory_order_relaxed) > 0.5f;
+    bypassSmoothed.setTargetValue (isBypassed ? 1.0f : 0.0f);
+
+    // Si el bypass está en 100% y no está en transición, salida directa sin costo de CPU
+    if (bypassSmoothed.getCurrentValue() >= 1.0f && !bypassSmoothed.isSmoothing())
+        return;
+
+    // Guardar una copia cruda de la entrada para el crossfade del soft-bypass
+    for (int channel = 0; channel < totalNumInputChannels; ++channel)
+        juce::FloatVectorOperations::copy (rawInputBuffer.getWritePointer (channel), buffer.getReadPointer (channel), numSamples);
 
     const auto driveDb = driveParam->load (std::memory_order_relaxed);
     const auto levelDb = levelParam->load (std::memory_order_relaxed);
@@ -229,11 +261,21 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 
     juce::dsp::AudioBlock<float> block (buffer);
     juce::dsp::ProcessContextReplacing<float> context (block);
+
+    // 1. Noise Gate
     dspChain.get<gateIndex>().process (context);
 
+    // 2. Copiar señal limpia y retrasarla para alinear fase con el Oversampling
     for (int channel = 0; channel < totalNumInputChannels; ++channel)
         juce::FloatVectorOperations::copy (dryBuffer.getWritePointer (channel), buffer.getReadPointer (channel), numSamples);
 
+    juce::dsp::AudioBlock<float> dryBlock (dryBuffer.getArrayOfWritePointers(),
+                                           static_cast<size_t> (totalNumInputChannels),
+                                           static_cast<size_t> (numSamples));
+    juce::dsp::ProcessContextReplacing<float> dryContext (dryBlock);
+    dryDelayLine.process (dryContext);
+
+    // 3. Cadena de Distorsión
     dspChain.get<preEQIndex>().process (context);
     dspChain.get<preGainIndex>().process (context);
     dspChain.get<clipperIndex>().process (context);
@@ -248,9 +290,7 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         dryPointers[channel] = dryBuffer.getReadPointer (channel);
     }
 
-    // Dry/Wet vectorizado por bloques de mix constante para maximizar SIMD throughput.
-    // Si el mix no está en rampa, todo el bloque se puede mezclar de un golpe.
-    // Si está interpolando (automatización), lo hacemos muestra a muestra con SmoothedValue.
+    // 4. Dry/Wet SIMD Mix con alineación de fase
     if (mixSmoothed.isSmoothing())
     {
         for (int sample = 0; sample < numSamples; ++sample)
@@ -263,14 +303,28 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     }
     else
     {
-        // Mix estable — usar FloatVectorOperations para SIMD acceleration
-        const float mix    = mixSmoothed.getNextValue();
+        const float mix = mixSmoothed.getNextValue();
         const float dryGain = 1.0f - mix;
         for (int ch = 0; ch < totalNumInputChannels; ++ch)
         {
-            // wet = wet * mix + dry * dryGain
             juce::FloatVectorOperations::multiply (wetPointers[ch], mix, numSamples);
             juce::FloatVectorOperations::addWithMultiply (wetPointers[ch], dryPointers[ch], dryGain, numSamples);
+        }
+    }
+
+    // 5. Soft-Bypass Crossfade (De-Clicking)
+    if (bypassSmoothed.isSmoothing() || bypassSmoothed.getCurrentValue() > 0.0f)
+    {
+        for (int sample = 0; sample < numSamples; ++sample)
+        {
+            const float bypassAmount = bypassSmoothed.getNextValue();
+            const float activeAmount = 1.0f - bypassAmount;
+            for (int ch = 0; ch < totalNumInputChannels; ++ch)
+            {
+                const float raw = rawInputBuffer.getReadPointer (ch)[sample];
+                const float proc = wetPointers[ch][sample];
+                wetPointers[ch][sample] = bypassAmount * raw + activeAmount * proc;
+            }
         }
     }
 }
@@ -290,13 +344,20 @@ void DistortXAudioProcessor::setBiquadCoefficients (Filter& filter, double sampl
     const auto nyquist = static_cast<float> (sampleRate * 0.5);
     const auto clampedCutoff = juce::jlimit (20.0f, nyquist - 1.0f, cutoffHz);
 
-    if (highPass)
+    if (filter.state == nullptr)
     {
-        *filter.coefficients = *juce::dsp::IIR::Coefficients<float>::makeHighPass (sampleRate, clampedCutoff, q);
+        filter.state = highPass
+            ? juce::dsp::IIR::Coefficients<float>::makeHighPass (sampleRate, clampedCutoff, q)
+            : juce::dsp::IIR::Coefficients<float>::makeLowPass  (sampleRate, clampedCutoff, q);
         return;
     }
 
-    *filter.coefficients = *juce::dsp::IIR::Coefficients<float>::makeLowPass (sampleRate, clampedCutoff, q);
+    // operator= con ArrayCoefficients utiliza clearQuick() sobre la memoria pre-asignada
+    // normalizando automáticamente por a0 con cero reservas dinámicas en el audio thread.
+    if (highPass)
+        *filter.state = juce::dsp::IIR::ArrayCoefficients<float>::makeHighPass (sampleRate, clampedCutoff, q);
+    else
+        *filter.state = juce::dsp::IIR::ArrayCoefficients<float>::makeLowPass  (sampleRate, clampedCutoff, q);
 }
 
 bool DistortXAudioProcessor::hasEditor() const
@@ -309,9 +370,77 @@ juce::AudioProcessorEditor* DistortXAudioProcessor::createEditor()
     return new DistortXAudioProcessorEditor (*this);
 }
 
+const std::vector<DistortXAudioProcessor::Preset>& DistortXAudioProcessor::getFactoryPresets()
+{
+    static const std::vector<Preset> presets = {
+        { "Default",                -60.0f, 120.0f, 12.0f, 6500.0f,  0.0f, 1.0f,  false, 0 },
+        { "Warm Crunch",            -65.0f, 100.0f, 14.0f, 5500.0f,  1.0f, 1.0f,  false, 0 },
+        { "Tight Modern Lead",      -48.0f,  60.0f, 26.0f, 7200.0f,  0.0f, 1.0f,  false, 1 },
+        { "Vintage Blues Overdrive", -75.0f, 150.0f,  8.5f, 4800.0f,  3.0f, 1.0f,  false, 0 },
+        { "Heavy Wall of Sound",    -42.0f,  50.0f, 34.0f, 4200.0f, -2.0f, 1.0f,  false, 1 },
+        { "Clean Warm Boost",       -80.0f, 120.0f,  1.5f, 12000.0f, 6.0f, 1.0f,  false, 0 },
+        { "Parallel Aggression",    -60.0f, 100.0f, 28.0f, 8500.0f, -3.0f, 0.45f, false, 1 }
+    };
+    return presets;
+}
+
+int DistortXAudioProcessor::getNumPrograms()
+{
+    return static_cast<int> (getFactoryPresets().size());
+}
+
+int DistortXAudioProcessor::getCurrentProgram()
+{
+    return currentProgram;
+}
+
+const juce::String DistortXAudioProcessor::getProgramName (int index)
+{
+    const auto& presets = getFactoryPresets();
+    if (juce::isPositiveAndBelow (index, static_cast<int> (presets.size())))
+        return presets[static_cast<size_t> (index)].name;
+    return {};
+}
+
+void DistortXAudioProcessor::changeProgramName (int index, const juce::String& newName)
+{
+    juce::ignoreUnused (index, newName);
+}
+
+void DistortXAudioProcessor::loadPreset (int presetIndex)
+{
+    const auto& presets = getFactoryPresets();
+    if (! juce::isPositiveAndBelow (presetIndex, static_cast<int> (presets.size())))
+        return;
+
+    currentProgram = presetIndex;
+    const auto& p = presets[static_cast<size_t> (presetIndex)];
+
+    auto setParam = [this] (const juce::String& paramID, float val)
+    {
+        if (auto* param = dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (paramID)))
+            param->setValueNotifyingHost (param->getNormalisableRange().convertTo0to1 (val));
+    };
+
+    setParam ("gateThreshold", p.gateThreshold);
+    setParam ("gateDecay",     p.gateDecay);
+    setParam ("drive",         p.drive);
+    setParam ("tone",          p.tone);
+    setParam ("level",         p.level);
+    setParam ("mix",           p.mix);
+    setParam ("bypass",        p.bypass ? 1.0f : 0.0f);
+    setParam ("clipType",      static_cast<float> (p.clipType));
+}
+
+void DistortXAudioProcessor::setCurrentProgram (int index)
+{
+    loadPreset (index);
+}
+
 void DistortXAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
+    state.setProperty ("currentProgram", currentProgram, nullptr);
     std::unique_ptr<juce::XmlElement> xml (state.createXml());
     copyXmlToBinary (*xml, destData);
 }
@@ -320,7 +449,11 @@ void DistortXAudioProcessor::setStateInformation (const void* data, int sizeInBy
 {
     std::unique_ptr<juce::XmlElement> xmlState (getXmlFromBinary (data, sizeInBytes));
     if (xmlState != nullptr && xmlState->hasTagName (apvts.state.getType()))
-        apvts.replaceState (juce::ValueTree::fromXml (*xmlState));
+    {
+        auto vt = juce::ValueTree::fromXml (*xmlState);
+        currentProgram = vt.getProperty ("currentProgram", 0);
+        apvts.replaceState (vt);
+    }
 }
 
 // Envuelve el plugin para ser reconocido por los hosts
