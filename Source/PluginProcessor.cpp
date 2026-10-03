@@ -3,7 +3,11 @@
 
 void DistortXAudioProcessor::OversampledClipper::prepare (const juce::dsp::ProcessSpec& spec)
 {
-    oversampling = std::make_unique<juce::dsp::Oversampling<float>> (spec.numChannels, 2, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, false);
+    // FIREquiripple en lugar de PolyphaseIIR: los filtros IIR tienen polos de alta Q
+    // cerca de los ~11kHz que resuenan con el ataque de la púa (energía broadband),
+    // produciendo el "chicharreo" audible. Los filtros FIR no tienen polos y no pueden
+    // resonar — solución estándar en plugins de guitarra profesionales.
+    oversampling = std::make_unique<juce::dsp::Oversampling<float>> (spec.numChannels, 2, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true, false);
     oversampling->reset();
     oversampling->initProcessing (spec.maximumBlockSize);
 
@@ -127,7 +131,14 @@ void DistortXAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     dspChain.prepare (spec);
     dspChain.reset();
     dspChain.get<gateIndex>().setRatio (100.0f);
-    dspChain.get<gateIndex>().setAttack (2.0f);
+    // Attack de 25ms: evita el gate chattering (traqueteo) en cuerdas al aire.
+    // Con 2ms el gate podía responder a frecuencias de hasta ~500Hz, abriendo y
+    // cerrando al ritmo de la frecuencia fundamental de la cuerda (ej: 110Hz en
+    // cuerda A), lo que causaba el "chicharreo" audible al tocar.
+    // Con 25ms el gate no puede responder más rápido que ~40Hz (inaudible como
+    // modulación), pero sigue siendo lo suficientemente rápido para el ataque
+    // natural de una guitarra (imperceptible para el oído).
+    dspChain.get<gateIndex>().setAttack (25.0f);
     dspChain.get<gateIndex>().setThreshold (juce::jlimit (-100.0f, 0.0f, gateThresholdParam->load (std::memory_order_relaxed)));
     dspChain.get<gateIndex>().setRelease (juce::jlimit (5.0f, 500.0f, gateDecayParam->load (std::memory_order_relaxed)));
     dspChain.get<preGainIndex>().setRampDurationSeconds (0.02);
