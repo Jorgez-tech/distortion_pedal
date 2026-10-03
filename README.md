@@ -118,6 +118,20 @@ Los artefactos compilados se ubican en:
 
 ---
 
+## 🖥️ Uso de la Versión Standalone (.exe)
+
+La versión Standalone te permite tocar sin necesidad de abrir Reaper.
+
+**Para configurar tu interfaz de audio (ej. Behringer UMC22):**
+1. Abre `DistortX.exe`.
+2. En la barra superior de la ventana (donde están los botones de minimizar/cerrar), haz clic en el menú **Options** (Opciones).
+3. Selecciona **Audio/MIDI Settings...**.
+4. En **Audio Device Type**, selecciona **ASIO** (recomendado para baja latencia).
+5. En **Device**, selecciona el driver de tu interfaz (ej. ASIO4ALL o el driver ASIO nativo de Behringer).
+6. Activa tu entrada y salida correspondientes, y cierra la ventana de configuración.
+
+---
+
 ## 📄 Licencia
 
 Desarrollado por JZ Audio. Licencia MIT / Privada según aplique.

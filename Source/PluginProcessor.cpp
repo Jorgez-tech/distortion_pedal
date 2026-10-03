@@ -185,18 +185,18 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     juce::ScopedNoDenormals noDenormals;
     const auto totalNumInputChannels  = getTotalNumInputChannels();
     const auto totalNumOutputChannels = getTotalNumOutputChannels();
+    
+    const int numActiveChannels = juce::jmax (1, totalNumInputChannels);
 
-    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
+    for (auto i = numActiveChannels; i < buffer.getNumChannels(); ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
     const int numSamples = buffer.getNumSamples();
-    if (totalNumInputChannels > dryBuffer.getNumChannels() || numSamples > dryBuffer.getNumSamples())
+    if (numActiveChannels > dryBuffer.getNumChannels() || numSamples > dryBuffer.getNumSamples())
     {
         jassertfalse;
         return;
     }
-
-    jassert (totalNumInputChannels <= 2);
 
     const bool isBypassed = bypassParam->load (std::memory_order_relaxed) > 0.5f;
     bypassSmoothed.setTargetValue (isBypassed ? 1.0f : 0.0f);
@@ -206,7 +206,7 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         return;
 
     // Guardar una copia cruda de la entrada para el crossfade del soft-bypass
-    for (int channel = 0; channel < totalNumInputChannels; ++channel)
+    for (int channel = 0; channel < numActiveChannels; ++channel)
         juce::FloatVectorOperations::copy (rawInputBuffer.getWritePointer (channel), buffer.getReadPointer (channel), numSamples);
 
     const auto driveDb = driveParam->load (std::memory_order_relaxed);
@@ -259,18 +259,20 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         lastToneCutoffHz = toneCutoff;
     }
 
-    juce::dsp::AudioBlock<float> block (buffer);
+    juce::dsp::AudioBlock<float> block (buffer.getArrayOfWritePointers(), 
+                                        static_cast<size_t> (numActiveChannels), 
+                                        static_cast<size_t> (numSamples));
     juce::dsp::ProcessContextReplacing<float> context (block);
 
     // 1. Noise Gate
     dspChain.get<gateIndex>().process (context);
 
     // 2. Copiar señal limpia y retrasarla para alinear fase con el Oversampling
-    for (int channel = 0; channel < totalNumInputChannels; ++channel)
+    for (int channel = 0; channel < numActiveChannels; ++channel)
         juce::FloatVectorOperations::copy (dryBuffer.getWritePointer (channel), buffer.getReadPointer (channel), numSamples);
 
     juce::dsp::AudioBlock<float> dryBlock (dryBuffer.getArrayOfWritePointers(),
-                                           static_cast<size_t> (totalNumInputChannels),
+                                           static_cast<size_t> (numActiveChannels),
                                            static_cast<size_t> (numSamples));
     juce::dsp::ProcessContextReplacing<float> dryContext (dryBlock);
     dryDelayLine.process (dryContext);
@@ -284,7 +286,7 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
 
     float* wetPointers[2] {};
     const float* dryPointers[2] {};
-    for (int channel = 0; channel < totalNumInputChannels; ++channel)
+    for (int channel = 0; channel < numActiveChannels; ++channel)
     {
         wetPointers[channel] = buffer.getWritePointer (channel);
         dryPointers[channel] = dryBuffer.getReadPointer (channel);
@@ -297,7 +299,7 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         {
             const float mix = mixSmoothed.getNextValue();
             const float dryGain = 1.0f - mix;
-            for (int ch = 0; ch < totalNumInputChannels; ++ch)
+            for (int ch = 0; ch < numActiveChannels; ++ch)
                 wetPointers[ch][sample] = dryGain * dryPointers[ch][sample] + mix * wetPointers[ch][sample];
         }
     }
@@ -305,7 +307,7 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
     {
         const float mix = mixSmoothed.getNextValue();
         const float dryGain = 1.0f - mix;
-        for (int ch = 0; ch < totalNumInputChannels; ++ch)
+        for (int ch = 0; ch < numActiveChannels; ++ch)
         {
             juce::FloatVectorOperations::multiply (wetPointers[ch], mix, numSamples);
             juce::FloatVectorOperations::addWithMultiply (wetPointers[ch], dryPointers[ch], dryGain, numSamples);
@@ -319,13 +321,20 @@ void DistortXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juc
         {
             const float bypassAmount = bypassSmoothed.getNextValue();
             const float activeAmount = 1.0f - bypassAmount;
-            for (int ch = 0; ch < totalNumInputChannels; ++ch)
+            for (int ch = 0; ch < numActiveChannels; ++ch)
             {
                 const float raw = rawInputBuffer.getReadPointer (ch)[sample];
                 const float proc = wetPointers[ch][sample];
                 wetPointers[ch][sample] = bypassAmount * raw + activeAmount * proc;
             }
         }
+    }
+
+    // Mono-to-Stereo routing: si procesamos 1 canal pero la salida espera 2,
+    // copiamos la señal procesada del canal izquierdo al derecho.
+    if (numActiveChannels == 1 && totalNumOutputChannels == 2)
+    {
+        buffer.copyFrom (1, 0, buffer.getReadPointer (0), numSamples);
     }
 }
 
